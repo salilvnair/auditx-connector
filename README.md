@@ -60,6 +60,20 @@ Kafka key strategies (`audit.connector.kafka.message-key-type`):
 - `EVENT_ID`
 - `CONVERSATION_ID`
 
+### Dynamic table mapping (AuditxEntityConfig)
+
+`AuditxPhysicalNamingStrategy` maps logical `AUDITX_EVENT` using:
+
+```yaml
+auditx:
+  entity:
+    tables:
+      EVENT: your_custom_audit_table
+```
+
+This lets consumers override the physical table name without changing connector code.
+If your app uses a composite naming strategy (for example via `ccf-core`), this strategy is discovered as a regular `PhysicalNamingStrategy` bean and can be composed there.
+
 ### Outbox drain endpoint config (cron-driven)
 
 ```yaml
@@ -77,7 +91,7 @@ audit:
 ## Step 4: If using ASYNC_DB, create DB table manually
 
 ```sql
-CREATE TABLE IF NOT EXISTS audit_event (
+CREATE TABLE IF NOT EXISTS AUDITX_EVENT (
     event_id TEXT PRIMARY KEY,
     event_time TIMESTAMP NOT NULL,
     event_type TEXT NOT NULL,
@@ -98,14 +112,14 @@ CREATE TABLE IF NOT EXISTS audit_event (
     actor JSONB,
     error_map JSONB,
     event_payload JSONB,
-    CONSTRAINT uk_audit_event_idempotency_key UNIQUE (idempotency_key)
+    CONSTRAINT uk_auditx_event_idempotency_key UNIQUE (idempotency_key)
 );
 
-CREATE INDEX IF NOT EXISTS idx_audit_event_time ON audit_event (event_time);
-CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_event (event_type);
-CREATE INDEX IF NOT EXISTS idx_audit_event_group_id ON audit_event (group_id);
-CREATE INDEX IF NOT EXISTS idx_audit_event_interaction_id ON audit_event (interaction_id);
-CREATE INDEX IF NOT EXISTS idx_audit_event_source_time ON audit_event (source, event_time);
+CREATE INDEX IF NOT EXISTS idx_auditx_event_time ON AUDITX_EVENT (event_time);
+CREATE INDEX IF NOT EXISTS idx_auditx_event_type ON AUDITX_EVENT (event_type);
+CREATE INDEX IF NOT EXISTS idx_auditx_event_group_id ON AUDITX_EVENT (group_id);
+CREATE INDEX IF NOT EXISTS idx_auditx_event_interaction_id ON AUDITX_EVENT (interaction_id);
+CREATE INDEX IF NOT EXISTS idx_auditx_event_source_time ON AUDITX_EVENT (source, event_time);
 ```
 
 ## Step 5: Publish events

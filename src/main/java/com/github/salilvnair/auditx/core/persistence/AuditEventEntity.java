@@ -4,6 +4,7 @@ import com.github.salilvnair.auditx.core.model.CanonicalAuditEnvelope;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
+import jakarta.persistence.Table;
 import lombok.Getter;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
@@ -18,6 +19,7 @@ import java.util.UUID;
  * Generic persisted representation of canonical audit envelope.
  */
 @Entity(name = "AuditEvent")
+@Table(name = "AUDITX_EVENT")
 @Getter
 public class AuditEventEntity {
     @Id

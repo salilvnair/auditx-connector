@@ -6,6 +6,7 @@ import com.github.salilvnair.auditx.core.service.AuditService;
 import com.github.salilvnair.auditx.core.service.DefaultIdempotencyKeyFactory;
 import com.github.salilvnair.auditx.core.service.IdempotencyKeyFactory;
 import com.github.salilvnair.auditx.starter.config.AuditConnectorProperties;
+import com.github.salilvnair.auditx.starter.config.AuditxEntityConfig;
 import com.github.salilvnair.auditx.starter.outbox.AuditOutboxDrainService;
 import com.github.salilvnair.auditx.starter.persistence.AuditEventRepository;
 import com.github.salilvnair.auditx.starter.provider.KafkaAuditPublisher;
@@ -31,7 +32,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @AutoConfiguration
 @ConditionalOnClass(AuditPublisher.class)
-@EnableConfigurationProperties(AuditConnectorProperties.class)
+@EnableConfigurationProperties({AuditConnectorProperties.class, AuditxEntityConfig.class})
 public class AuditConnectorAutoConfiguration {
 
     @Configuration
