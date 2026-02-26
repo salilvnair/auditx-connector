@@ -23,7 +23,7 @@ public class AuditxPhysicalNamingStrategy extends PhysicalNamingStrategySnakeCas
         }
         String text = identifier.getText();
         if (text != null && text.equals("AUDITX_EVENT")) {
-            String entityNameKey = text.substring(4);
+            String entityNameKey = text.substring(7);
             Map<String, String> tables = config.getTables();
             if (tables.containsKey(entityNameKey)) {
                 String dynamicTableName = tables.get(entityNameKey);

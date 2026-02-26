@@ -1,6 +1,7 @@
 package com.github.salilvnair.auditx.starter.autoconfigure;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.salilvnair.auditx.core.config.hibernate.AuditxPhysicalNamingStrategy;
 import com.github.salilvnair.auditx.core.service.AuditPublisher;
 import com.github.salilvnair.auditx.core.service.AuditService;
 import com.github.salilvnair.auditx.core.service.DefaultIdempotencyKeyFactory;
@@ -14,12 +15,15 @@ import com.github.salilvnair.auditx.starter.provider.JpaAuditPublisher;
 import com.github.salilvnair.auditx.starter.service.DefaultAuditService;
 import com.github.salilvnair.auditx.starter.web.AuditIngressController;
 import com.github.salilvnair.auditx.starter.web.AuditOutboxDrainController;
+import org.hibernate.boot.model.naming.PhysicalNamingStrategy;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.persistence.autoconfigure.EntityScan;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Configuration;
@@ -38,6 +42,7 @@ public class AuditConnectorAutoConfiguration {
     @Configuration
     @Conditional(AsyncDbPublisherCondition.class)
     @EnableJpaRepositories(basePackageClasses = AuditEventRepository.class)
+    @EntityScan(basePackageClasses = AuditEventRepository.class)
     static class JpaRepositoryConfiguration {
     }
 
@@ -54,7 +59,7 @@ public class AuditConnectorAutoConfiguration {
             AuditEventRepository repository,
             IdempotencyKeyFactory idempotencyKeyFactory,
             AuditConnectorProperties properties,
-            AsyncTaskExecutor auditXAsyncTaskExecutor
+            @Qualifier("auditXAsyncTaskExecutor") AsyncTaskExecutor auditXAsyncTaskExecutor
     ) {
         return new JpaAuditPublisher(repository, idempotencyKeyFactory, properties, auditXAsyncTaskExecutor);
     }
@@ -68,7 +73,7 @@ public class AuditConnectorAutoConfiguration {
             KafkaTemplate<String, String> kafkaTemplate,
             IdempotencyKeyFactory idempotencyKeyFactory,
             AuditConnectorProperties properties,
-            AsyncTaskExecutor auditXAsyncTaskExecutor
+            @Qualifier("auditXAsyncTaskExecutor") AsyncTaskExecutor auditXAsyncTaskExecutor
     ) {
         return new KafkaAuditPublisher(
                 kafkaTemplate,
@@ -89,6 +94,12 @@ public class AuditConnectorAutoConfiguration {
     @ConditionalOnMissingBean
     public AuditService auditService(AuditPublisher auditPublisher) {
         return new DefaultAuditService(auditPublisher);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(PhysicalNamingStrategy.class)
+    public PhysicalNamingStrategy auditxPhysicalNamingStrategy(AuditxEntityConfig config) {
+        return new AuditxPhysicalNamingStrategy(config);
     }
 
     @Bean
@@ -114,6 +125,7 @@ public class AuditConnectorAutoConfiguration {
     @ConditionalOnMissingBean
     @ConditionalOnClass(RestController.class)
     @ConditionalOnProperty(prefix = "audit.connector.outbox-drain", name = "enabled", havingValue = "true")
+    @ConditionalOnBean(AuditOutboxDrainService.class)
     public AuditOutboxDrainController auditOutboxDrainController(AuditOutboxDrainService outboxDrainService) {
         return new AuditOutboxDrainController(outboxDrainService);
     }
