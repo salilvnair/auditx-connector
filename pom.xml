@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>com.github.salilvnair</groupId>
     <artifactId>auditx-connector</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <name>AuditX Connector</name>
     <description>Reusable canonical audit connector for Java and Python ecosystems.</description>
     <url>https://github.com/salilvnair/auditx-connector</url>

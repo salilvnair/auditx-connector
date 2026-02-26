@@ -92,7 +92,7 @@ audit:
 
 ```sql
 CREATE TABLE IF NOT EXISTS AUDITX_EVENT (
-    event_id TEXT PRIMARY KEY,
+    event_id uuid DEFAULT uuid_generate_v4() NOT NULL,
     event_time TIMESTAMP NOT NULL,
     event_type TEXT NOT NULL,
     severity TEXT NOT NULL,
@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS AUDITX_EVENT (
     actor JSONB,
     error_map JSONB,
     event_payload JSONB,
+    CONSTRAINT AUDITX_EVENT_pkey PRIMARY KEY (event_id),
     CONSTRAINT uk_auditx_event_idempotency_key UNIQUE (idempotency_key)
 );
 
