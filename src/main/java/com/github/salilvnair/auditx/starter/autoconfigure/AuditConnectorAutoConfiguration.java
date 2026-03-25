@@ -2,6 +2,7 @@ package com.github.salilvnair.auditx.starter.autoconfigure;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.salilvnair.auditx.core.config.hibernate.AuditxPhysicalNamingStrategy;
+import com.github.salilvnair.auditx.core.persistence.AuditEventEntity;
 import com.github.salilvnair.auditx.core.service.AuditPublisher;
 import com.github.salilvnair.auditx.core.service.AuditService;
 import com.github.salilvnair.auditx.core.service.DefaultIdempotencyKeyFactory;
@@ -42,7 +43,7 @@ public class AuditConnectorAutoConfiguration {
     @Configuration
     @Conditional(AsyncDbPublisherCondition.class)
     @EnableJpaRepositories(basePackageClasses = AuditEventRepository.class)
-    @EntityScan(basePackageClasses = AuditEventRepository.class)
+    @EntityScan(basePackageClasses = AuditEventEntity.class)
     static class JpaRepositoryConfiguration {
     }
 
