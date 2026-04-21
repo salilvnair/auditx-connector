@@ -7,6 +7,7 @@ import com.github.salilvnair.auditx.core.service.AuditPublisher;
 import com.github.salilvnair.auditx.core.service.IdempotencyKeyFactory;
 import com.github.salilvnair.auditx.starter.config.AuditConnectorProperties;
 import com.github.salilvnair.auditx.starter.persistence.AuditEventRepository;
+import lombok.extern.slf4j.Slf4j;
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -14,6 +15,7 @@ import java.util.Objects;
 import java.util.UUID;
 
 @RequiredArgsConstructor
+@Slf4j
 public class JpaAuditPublisher implements AuditPublisher {
     private final AuditEventRepository repository;
     private final IdempotencyKeyFactory idempotencyKeyFactory;
@@ -27,7 +29,19 @@ public class JpaAuditPublisher implements AuditPublisher {
         }
 
         if (properties.isAsyncJpaPublish()) {
-            asyncTaskExecutor.submit(() -> doPublish(envelope));
+            asyncTaskExecutor.submit(() -> {
+                try {
+                    doPublish(envelope);
+                } catch (Exception ex) {
+                    log.error(
+                            "Async audit publish failed. eventType={}, conversationId={}, interactionId={}",
+                            envelope.getEventType(),
+                            envelope.getConversationId(),
+                            envelope.getInteractionId(),
+                            ex
+                    );
+                }
+            });
             return;
         }
 
