@@ -15,6 +15,23 @@ import java.util.*;
  *   AuditXContext.record("adminUser", adminUser);
  *   AuditXContext.record("testApproved", testApproved);
  *   AuditXContext.record("callbackPath", "failure");
+ * <p>
+ *   AuditXContext.tag("tenant", tenantId);
+ *   AuditXContext.tag("env", "production");
+ *   AuditXContext.tag("featureFlag", "new-pricing-enabled");
+ * <p>
+ *   AuditXContext.append("visitedNode", nodeId); // for recursive/looping methods
+ * <p>
+ *   AuditXContext.records(
+ *       "billRef",           billRef,
+ *       "finalMeterReading", reading.toPlainString(),
+ *       "billingEngine",     "BILLING_API_V2"
+ *   );
+ * <p>
+ *   AuditXContext.tags(
+ *       "system",      "ZAPPER",
+ *       "meterSerial", meterSerial != null ? meterSerial : "UNKNOWN"
+ *   );
 
  * No Spring injection needed. Pure static calls.
  * Works across the entire call chain in the same thread.
@@ -45,10 +62,10 @@ public final class AuditXContext {
      * Record a structured tag — a string key/value pair stored in a dedicated tags column.
      * Use for low-cardinality, indexable metadata: tenant, environment, region, feature-flag.
      * These go into their own DB column (not extraMap), so they can be filtered efficiently.
-     *
+     * <p>
      * Contrast with record(): record() is for arbitrary runtime values (booleans, counts,
      * computed objects). tag() is for stable, categorical labels you will query by.
-     *
+     * <p>
      * Example:
      *   AuditXContext.tag("tenant", tenantId);
      *   AuditXContext.tag("env", "production");
@@ -66,12 +83,12 @@ public final class AuditXContext {
     /**
      * Append a value to a list under the given key.
      * Safe for recursive or looping methods where the same key is written many times.
-     *
+     * <p>
      * Behaviour:
      *   - Key does not exist yet          → creates List with this value
      *   - Key exists as a plain value     → converts to List, keeps old value, adds new
      *   - Key exists as a List            → appends to the existing list
-     *
+     * <p>
      * Example in a recursive method:
      *   AuditXContext.append("visitedNode", nodeId);
      * Snapshot result:
@@ -94,6 +111,49 @@ public final class AuditXContext {
             List<Object> list = new ArrayList<>();
             list.add(value);
             ctx.put(key, list);
+        }
+    }
+
+    /**
+     * Record multiple key-value pairs in one call.
+     * Pairs must alternate: key, value, key, value, ...
+     * Keys must be Strings; values can be any Object.
+     * <p>
+     * Example:
+     *   AuditXContext.records(
+     *       "billRef",           billRef,
+     *       "finalMeterReading", reading.toPlainString(),
+     *       "billingEngine",     "BILLING_API_V2"
+     *   );
+     */
+    public static void records(Object... pairs) {
+        if (pairs.length % 2 != 0) {
+            throw new IllegalArgumentException("records() requires an even number of arguments (key, value, ...)");
+        }
+        Map<String, Object> ctx = CONTEXT.get();
+        for (int i = 0; i < pairs.length; i += 2) {
+            ctx.put((String) pairs[i], pairs[i + 1]);
+        }
+    }
+
+    /**
+     * Record multiple tags in one call.
+     * Pairs must alternate: key, value, key, value, ...
+     * Both keys and values must be Strings.
+     * <p>
+     * Example:
+     *   AuditXContext.tags(
+     *       "system",      "ZAPPER",
+     *       "meterSerial", meterSerial != null ? meterSerial : "UNKNOWN"
+     *   );
+     */
+    public static void tags(Object... pairs) {
+        if (pairs.length % 2 != 0) {
+            throw new IllegalArgumentException("tags() requires an even number of arguments (key, value, ...)");
+        }
+        Map<String, String> t = TAGS.get();
+        for (int i = 0; i < pairs.length; i += 2) {
+            t.put((String) pairs[i], (String) pairs[i + 1]);
         }
     }
 
