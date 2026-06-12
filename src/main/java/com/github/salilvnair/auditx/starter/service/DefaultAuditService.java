@@ -53,6 +53,7 @@ public class DefaultAuditService implements AuditService {
                 .idempotencyKey(request.getIdempotencyKey())
                 .businessKeys(request.getBusinessKeys())
                 .extraMap(request.getExtraMap())
+                .tags(request.getTags())
                 .actor(request.getActor())
                 .errorMap(request.getErrorMap())
                 .build();

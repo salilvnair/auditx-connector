@@ -1,6 +1,9 @@
 package com.github.salilvnair.auditx.starter.autoconfigure;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.salilvnair.auditx.core.aop.aspect.AuditableAspect;
+import com.github.salilvnair.auditx.core.aop.interceptor.AuditXContextInterceptor;
+import com.github.salilvnair.auditx.core.aop.interceptor.MdcAuditXInterceptor;
 import com.github.salilvnair.auditx.core.config.hibernate.AuditxPhysicalNamingStrategy;
 import com.github.salilvnair.auditx.core.persistence.AuditEventEntity;
 import com.github.salilvnair.auditx.core.service.AuditPublisher;
@@ -17,7 +20,9 @@ import com.github.salilvnair.auditx.starter.service.DefaultAuditService;
 import com.github.salilvnair.auditx.starter.web.AuditIngressController;
 import com.github.salilvnair.auditx.starter.web.AuditOutboxDrainController;
 import org.hibernate.boot.model.naming.PhysicalNamingStrategy;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -34,6 +39,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
+import java.util.stream.Collectors;
 
 @AutoConfiguration
 @ConditionalOnClass(AuditPublisher.class)
@@ -95,6 +103,23 @@ public class AuditConnectorAutoConfiguration {
     @ConditionalOnMissingBean
     public AuditService auditService(AuditPublisher auditPublisher) {
         return new DefaultAuditService(auditPublisher);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public AuditableAspect auditableAspect(
+            AuditService auditService,
+            ObjectProvider<AuditXContextInterceptor> interceptors) {
+        List<AuditXContextInterceptor> ordered = interceptors.stream().collect(Collectors.toList());
+        AnnotationAwareOrderComparator.sort(ordered);
+        return new AuditableAspect(auditService, ordered);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(MdcAuditXInterceptor.class)
+    @ConditionalOnProperty(prefix = "audit.connector.mdc-interceptor", name = "enabled", havingValue = "true")
+    public MdcAuditXInterceptor mdcAuditXInterceptor() {
+        return new MdcAuditXInterceptor();
     }
 
     @Bean

@@ -11,6 +11,7 @@ import lombok.extern.slf4j.Slf4j;
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.dao.DataIntegrityViolationException;
+import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -68,8 +69,8 @@ public class JpaAuditPublisher implements AuditPublisher {
 
     private CanonicalAuditEnvelope enrichDefaults(CanonicalAuditEnvelope envelope) {
         CanonicalAuditEnvelope withServiceFields = CanonicalAuditEnvelope.builder()
-                .eventId(envelope.getEventId())
-                .eventTime(envelope.getEventTime())
+                .eventId(envelope.getEventId() != null ? envelope.getEventId() : UUID.randomUUID())
+                .eventTime(envelope.getEventTime() != null ? envelope.getEventTime() : Instant.now())
                 .eventType(envelope.getEventType())
                 .severity(envelope.getSeverity())
                 .source(envelope.getSource())
@@ -85,14 +86,18 @@ public class JpaAuditPublisher implements AuditPublisher {
                 .idempotencyKey(envelope.getIdempotencyKey())
                 .businessKeys(envelope.getBusinessKeys())
                 .extraMap(envelope.getExtraMap())
+                .tags(envelope.getTags())
                 .actor(envelope.getActor())
                 .errorMap(envelope.getErrorMap())
                 .build();
 
-        if (!properties.isEnforceIdempotency()) {
-            return withServiceFields;
-        }
+        // Auto-generate conversationId if not supplied — callers shouldn't be forced to provide one.
+        withServiceFields = isBlank(withServiceFields.getConversationId())
+                ? withServiceFields.withConversationId(UUID.randomUUID().toString())
+                : withServiceFields;
 
+        // Always generate an idempotency key — the column is NOT NULL.
+        // enforce-idempotency only controls whether we CHECK for duplicates before insert.
         if (isBlank(withServiceFields.getIdempotencyKey())) {
             return withServiceFields.withIdempotencyKey(idempotencyKeyFactory.create(withServiceFields));
         }
@@ -105,16 +110,6 @@ public class JpaAuditPublisher implements AuditPublisher {
     }
 
     private void validate(CanonicalAuditEnvelope envelope) {
-        if (isBlank(envelope.getConversationId())) {
-            throw new IllegalArgumentException("conversationId is required and must be a UUID");
-        }
-
-        try {
-            UUID.fromString(envelope.getConversationId());
-        } catch (IllegalArgumentException ex) {
-            throw new IllegalArgumentException("conversationId must be a valid UUID", ex);
-        }
-
         if (envelope.getSource() == AuditSource.UI && isBlank(envelope.getSessionId())) {
             throw new IllegalArgumentException("sessionId is required when source is UI");
         }

@@ -37,6 +37,10 @@ public class AuditWriteRequest {
     @lombok.Singular("extra")
     Map<String, Object> extraMap;
 
+    /** Low-cardinality string labels (tenant, env, region) stored in their own DB column. */
+    @lombok.Singular("tag")
+    Map<String, String> tags;
+
     @lombok.Singular("actorEntry")
     Map<String, Object> actor;
 

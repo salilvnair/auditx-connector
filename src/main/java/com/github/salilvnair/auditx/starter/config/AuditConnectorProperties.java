@@ -15,12 +15,19 @@ public class AuditConnectorProperties {
     private AuditPublisherType publisherType = AuditPublisherType.ASYNC_DB;
     private Kafka kafka = new Kafka();
     private OutboxDrain outboxDrain = new OutboxDrain();
+    private MdcInterceptor mdcInterceptor = new MdcInterceptor();
 
     @Getter
     @Setter
     public static class Kafka {
         private String topic = "auditx.events";
         private KafkaMessageKeyType messageKeyType = KafkaMessageKeyType.IDEMPOTENCY_KEY;
+    }
+
+    @Getter
+    @Setter
+    public static class MdcInterceptor {
+        private boolean enabled = false;
     }
 
     @Getter

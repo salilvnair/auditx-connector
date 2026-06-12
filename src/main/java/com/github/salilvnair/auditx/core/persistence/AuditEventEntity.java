@@ -77,6 +77,10 @@ public class AuditEventEntity {
 
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "jsonb")
+    private Map<String, String> tags = new HashMap<>();
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(columnDefinition = "jsonb")
     private Map<String, Object> actor = new HashMap<>();
 
     @JdbcTypeCode(SqlTypes.JSON)
@@ -106,6 +110,7 @@ public class AuditEventEntity {
         entity.idempotencyKey = envelope.getIdempotencyKey();
         entity.businessKeys = new HashMap<>(envelope.getBusinessKeys());
         entity.extraMap = new HashMap<>(envelope.getExtraMap());
+        entity.tags = new HashMap<>(envelope.getTags());
         entity.actor = new HashMap<>(envelope.getActor());
         entity.errorMap = new HashMap<>(envelope.getErrorMap());
         entity.eventPayload = toEventPayload(envelope);
@@ -114,8 +119,8 @@ public class AuditEventEntity {
 
     private static Map<String, Object> toEventPayload(CanonicalAuditEnvelope envelope) {
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("eventId", envelope.getEventId());
-        payload.put("eventTime", envelope.getEventTime());
+        payload.put("eventId", envelope.getEventId() != null ? envelope.getEventId().toString() : null);
+        payload.put("eventTime", envelope.getEventTime() != null ? envelope.getEventTime().toString() : null);
         payload.put("eventType", envelope.getEventType());
         payload.put("severity", envelope.getSeverity() == null ? null : envelope.getSeverity().name());
         payload.put("source", envelope.getSource() == null ? null : envelope.getSource().name());
@@ -131,6 +136,7 @@ public class AuditEventEntity {
         payload.put("idempotencyKey", envelope.getIdempotencyKey());
         payload.put("businessKeys", envelope.getBusinessKeys());
         payload.put("extraMap", envelope.getExtraMap());
+        payload.put("tags", envelope.getTags());
         payload.put("actor", envelope.getActor());
         payload.put("errorMap", envelope.getErrorMap());
         return payload;

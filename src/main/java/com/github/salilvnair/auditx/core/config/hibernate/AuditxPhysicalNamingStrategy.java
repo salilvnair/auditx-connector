@@ -22,15 +22,15 @@ public class AuditxPhysicalNamingStrategy extends PhysicalNamingStrategySnakeCas
             return null;
         }
         String text = identifier.getText();
-        if (text != null && text.equals("AUDITX_EVENT")) {
-            String entityNameKey = text.substring(7);
+        if (text != null) {
+            // Config keys use the entity suffix: AUDITX_EVENT → EVENT, AUDITX_OUTBOX → OUTBOX
+            String entityKey = text.toUpperCase().replaceFirst("^AUDITX_", "");
             Map<String, String> tables = config.getTables();
-            if (tables.containsKey(entityNameKey)) {
-                String dynamicTableName = tables.get(entityNameKey);
-                return Identifier.toIdentifier(dynamicTableName, identifier.isQuoted());
+            if (tables.containsKey(entityKey)) {
+                return Identifier.toIdentifier(tables.get(entityKey), identifier.isQuoted());
             }
         }
-        return identifier;
+        return super.toPhysicalTableName(identifier, jdbcEnvironment);
     }
 
     @Override
