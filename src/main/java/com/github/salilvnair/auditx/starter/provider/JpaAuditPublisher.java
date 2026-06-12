@@ -50,7 +50,6 @@ public class JpaAuditPublisher implements AuditPublisher {
     }
 
     private void doPublish(CanonicalAuditEnvelope envelope) {
-        validate(envelope);
 
         CanonicalAuditEnvelope enriched = enrichDefaults(envelope);
 
@@ -107,11 +106,5 @@ public class JpaAuditPublisher implements AuditPublisher {
 
     private boolean isBlank(String value) {
         return Objects.isNull(value) || value.isBlank();
-    }
-
-    private void validate(CanonicalAuditEnvelope envelope) {
-        if (envelope.getSource() == AuditSource.UI && isBlank(envelope.getSessionId())) {
-            throw new IllegalArgumentException("sessionId is required when source is UI");
-        }
     }
 }
