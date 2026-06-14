@@ -8,6 +8,18 @@ Reusable Spring Boot audit connector for publishing canonical audit events with 
 
 ## Changelog
 
+### 1.0.9
+- `AuditXContext.recordConversationId(String)` — override `@AuditX` `conversationId` SpEL from inside the method body
+- `AuditXContext.recordInteractionId(String)` — override `@AuditX` `interactionId` SpEL from inside the method body
+- `AuditXContext.recordGroupId(String)` — override `@AuditX` `groupId` SpEL from inside the method body
+- `AuditXContext.recordTraceId(String)` — override `@AuditX` `traceId` SpEL from inside the method body
+- `AuditXContext.recordSessionId(String)` — set `sessionId` programmatically (no SpEL equivalent on `@AuditX`)
+- `AuditXContext.publish()` — mid-loop publish for cron/batch jobs; fires the audit record immediately, resets context for the next iteration
+- `AuditableAspect` skips the final publish when context is empty and no error occurred (supports the loop-publish pattern correctly)
+
+### 1.0.8
+- Removed mandatory `sessionId` validation for `source = UI` — `sessionId` is now always optional regardless of source
+
 ### 1.0.7
 - `AuditXContext.records(Object... pairs)` — bulk record multiple key-value pairs in one call
 - `AuditXContext.tags(Object... pairs)` — bulk set multiple tags in one call
@@ -37,7 +49,7 @@ Add `auditx-connector` to your consumer service dependencies.
 <dependency>
     <groupId>com.github.salilvnair</groupId>
     <artifactId>auditx-connector</artifactId>
-    <version>1.0.7</version>
+    <version>1.0.9</version>
 </dependency>
 ```
 
@@ -46,9 +58,9 @@ Add `auditx-connector` to your consumer service dependencies.
 ```java
 @SpringBootApplication
 @EnableAuditX
-public class OrderDisconnectApplication {
+public class OrderUserApplication {
     public static void main(String[] args) {
-        SpringApplication.run(OrderDisconnectApplication.class, args);
+        SpringApplication.run(OrderUserApplication.class, args);
     }
 }
 ```
@@ -205,11 +217,11 @@ you drop into `AuditXContext` during the call, and publishes one audit record on
 
 ```java
 @AuditX(
-    eventType      = "ZAP_SUBMIT_DISCONNECT",
+    eventType      = "ZAP_SUBMIT_USER_REQUEST",
     source         = AuditSource.API,
-    conversationId = "#request.requestId"
+    conversationId = "#request.userId"
 )
-public DisconnectResult submitDisconnect(SubmitDisconnectRequest request) {
+public UserResult submitUser(SubmitUserRequest request) {
     AuditXContext.record("accountNumber", request.getAccountNumber());
     AuditXContext.record("bundleCode",    request.getBundleCode());
     // ... business logic
@@ -240,7 +252,7 @@ The method always runs. Only the publish is suppressed when `condition` evaluate
     source    = AuditSource.API,
     condition = "#auditEnabled == true"
 )
-public StatusResult getStatus(String requestId, boolean auditEnabled) { ... }
+public StatusResult getStatus(String userId, boolean auditEnabled) { ... }
 ```
 
 #### Error severity
@@ -265,9 +277,9 @@ Inner methods still contribute `AuditXContext` records — they merge into the r
 No inner records are written separately.
 
 ```java
-// root — DEPTH=0 on entry → publishes ZAP_SUBMIT_DISCONNECT
-@AuditX(eventType = "ZAP_SUBMIT_DISCONNECT", source = AuditSource.API)
-public DisconnectResult submitDisconnect(SubmitDisconnectRequest request) {
+// root — DEPTH=0 on entry → publishes ZAP_SUBMIT_USER_REQUEST
+@AuditX(eventType = "ZAP_SUBMIT_USER_REQUEST", source = AuditSource.API)
+public UserResult submitUser(SubmitUserRequest request) {
     List<String> errors = validationService.validate(request);  // ← nested @AuditX
     // validationService.validate writes valCustomerFound, valErrorCount, etc.
     // Those keys merge INTO this record — no separate ZAP_VALIDATE_SUBMIT is written.
@@ -275,13 +287,13 @@ public DisconnectResult submitDisconnect(SubmitDisconnectRequest request) {
 
 // nested — DEPTH=1 on entry → contributes only, does not publish
 @AuditX(eventType = "ZAP_VALIDATE_SUBMIT", source = AuditSource.API)
-public List<String> validate(SubmitDisconnectRequest request) {
+public List<String> validate(SubmitUserRequest request) {
     AuditXContext.record("valCustomerFound", customer.isPresent());
     AuditXContext.record("valErrorCount",    errors.size());
 }
 ```
 
-Result in DB: one row for `ZAP_SUBMIT_DISCONNECT` containing both root and nested keys.
+Result in DB: one row for `ZAP_SUBMIT_USER_REQUEST` containing both root and nested keys.
 
 #### Transaction ordering
 
@@ -397,21 +409,128 @@ for (ValidationRule rule : rules) {
 
 ---
 
+#### Canonical field setters *(1.0.9)* — `recordConversationId`, `recordInteractionId`, `recordGroupId`, `recordTraceId`, `recordSessionId`
+
+Override the `@AuditX` SpEL expressions for canonical fields from inside the method body.
+Useful when the value is only available at runtime — e.g. a DB row's ID, a cron-generated batch key — and cannot be referenced via SpEL at annotation-declaration time.
+Last call wins. Canonical setter values take precedence over matching `@AuditX` SpEL.
+
+| Method | Overrides |
+|---|---|
+| `AuditXContext.recordConversationId(String)` | `@AuditX(conversationId = "...")` |
+| `AuditXContext.recordInteractionId(String)` | `@AuditX(interactionId = "...")` |
+| `AuditXContext.recordGroupId(String)` | `@AuditX(groupId = "...")` |
+| `AuditXContext.recordTraceId(String)` | `@AuditX(traceId = "...")` |
+| `AuditXContext.recordSessionId(String)` | *(no SpEL equivalent — only way to set sessionId via context)* |
+
+```java
+@AuditX(eventType = "ZAP_CRON_PROCESS_ITEM", source = AuditSource.CRON)
+public void processOneRequest(String userId, String accountNumber) {
+    // userId comes from the DB row — not known at annotation time, can't use SpEL here
+    AuditXContext.recordInteractionId(userId);
+    AuditXContext.recordConversationId(userId);
+    AuditXContext.recordGroupId("CRON-BATCH-" + Instant.now().toEpochMilli() / 60_000);
+    AuditXContext.tag("system", "ZAPPER");
+    AuditXContext.records("accountNumber", accountNumber, "processingMode", "PER_ITEM");
+    // ... business logic
+    AuditXContext.record("outcome", "SUCCESS");
+}
+```
+
+---
+
+#### `publish()` — mid-loop publish *(1.0.9)*
+
+Publish the current context immediately as an audit record, then reset `extra_map`, `tags`, and canonical overrides for the next iteration.
+Designed for **cron/batch jobs** where each processed item needs its own row in `auditx_event`.
+
+Must be called from within an `@AuditX`-annotated method — throws `IllegalStateException` otherwise.
+
+When the method exits normally with an **empty** context (all iterations called `publish()`), the aspect **skips** the final publish. If the method throws after partial iterations, the failing iteration's context is captured with the error in the final publish.
+
+**Pattern A — `@AuditX` on the inner per-item method**
+
+Each call to `processOneRequest()` is depth=0 → publishes its own record independently.
+Simplest approach. No `publish()` needed.
+
+```java
+// Outer orchestrator — no @AuditX
+public List<String> runBatch() {
+    List<UserRequestEntity> pending = repo.findByStatusNotIn(List.of(900, 950, 999));
+    for (UserRequestEntity req : pending) {
+        processOneRequest(req.getId(), req.getAccountNumber());  // each call = its own record
+    }
+}
+
+// Per-item method carries its own @AuditX
+@AuditX(eventType = "ZAP_CRON_PROCESS_ITEM", source = AuditSource.CRON)
+public void processOneRequest(String userId, String accountNumber) {
+    AuditXContext.recordInteractionId(userId);
+    AuditXContext.recordGroupId("CRON-" + Instant.now().toEpochMilli() / 60_000);
+    AuditXContext.records("accountNumber", accountNumber);
+    // ... business logic
+    AuditXContext.record("outcome", "SUCCESS");
+}
+```
+
+**Pattern B — `@AuditX` on the outer method + `publish()` in the loop**
+
+One `@AuditX` wraps the whole batch method. `publish()` fires at the end of each iteration to flush that item's context and reset for the next one.
+
+```java
+@AuditX(eventType = "ZAP_CRON_BATCH_ITEM", source = AuditSource.CRON)
+public List<String> processPendingBatch(String batchId) {
+    List<UserRequestEntity> pending = repo.findByStatusNotIn(List.of(900, 950, 999));
+    List<String> processed = new ArrayList<>();
+
+    for (UserRequestEntity req : pending) {
+        // canonical fields — per-item, reset by publish() each iteration
+        AuditXContext.recordInteractionId(req.getId());
+        AuditXContext.recordGroupId(batchId);  // ties all rows to this batch run
+
+        AuditXContext.tag("system", "ZAPPER");
+        AuditXContext.records(
+            "accountNumber",  req.getAccountNumber(),
+            "processingMode", "PATTERN_B_INLINE_PUBLISH",
+            "batchId",        batchId
+        );
+
+        try {
+            doWork(req.getId());
+            AuditXContext.record("outcome", "SUCCESS");
+            processed.add(req.getId());
+        } catch (Exception ex) {
+            AuditXContext.record("outcome",       "FAILED");
+            AuditXContext.record("failureReason", ex.getMessage());
+        }
+
+        AuditXContext.publish(); // flush this item → reset → next iteration starts clean
+    }
+
+    // method exits with empty context → aspect skips final publish → no duplicate record
+    return processed;
+}
+```
+
+Result in DB: one row per loop iteration, each with its own `interaction_id`, grouped by `group_id = batchId`.
+
+---
+
 #### Full example combining all methods
 
 ```java
 @AuditX(
     eventType      = "ZAP_FINAL_BILL",
     source         = AuditSource.SYSTEM,
-    conversationId = "#requestId"
+    conversationId = "#userId"
 )
 @Transactional
-public DisconnectResult triggerFinalBill(String requestId) {
-    DisconnectRequestEntity req = requestRepository.findById(requestId).orElseThrow();
+public UserResult triggerFinalBill(String userId) {
+    UserRequestEntity req = requestRepository.findById(userId).orElseThrow();
     CustomerEntity customer     = customerRepository.findByAccountNumber(req.getAccountNumber()).orElseThrow();
 
-    FinalBillResult bill = billingService.trigger(requestId, req.getAccountNumber(),
-                                                   customer.getMeterSerial(), req.getDisconnectDate());
+    FinalBillResult bill = billingService.trigger(userId, req.getAccountNumber(),
+                                                   customer.getMeterSerial(), req.getUserDate());
 
     // tags — go into dedicated indexed column
     AuditXContext.tags(
@@ -432,7 +551,7 @@ public DisconnectResult triggerFinalBill(String requestId) {
         AuditXContext.record("smartMeterReading", "REMOTE");
     }
 
-    return DisconnectResult.finalBillTriggered(requestId, bill.getBillRef());
+    return UserResult.finalBillTriggered(userId, bill.getBillRef());
 }
 ```
 
@@ -502,7 +621,7 @@ If you prefer direct service calls over the `@AuditX` aspect, all three publish 
 
 ```java
 auditService.publish(
-    "DISCONNECT_REQUEST_RECEIVED",
+    "USER_REQUEST_REQUEST_RECEIVED",
     "550e8400-e29b-41d4-a716-446655440000",
     Map.of(
         "zapperCustId", "ZP-10091",
@@ -533,10 +652,10 @@ auditService.publishError(AuditWriteRequest.builder()
 
 ```java
 CanonicalAuditEnvelope envelope = CanonicalAuditEnvelope.builder()
-    .eventType("DISCONNECT_API_TRIGGERED")
+    .eventType("USER_REQUEST_API_TRIGGERED")
     .severity(AuditSeverity.INFO)
     .source(AuditSource.API)
-    .serviceName("zapper-disconnect-service")
+    .serviceName("zapper-user-request-service")
     .serviceVersion("1.2.0")
     .environment("prod")
     .conversationId("550e8400-e29b-41d4-a716-446655440000")
@@ -545,8 +664,8 @@ CanonicalAuditEnvelope envelope = CanonicalAuditEnvelope.builder()
     .traceId("trace-9f8d2")
     .spanId("span-11")
     .businessKey("zapperCustId",  "ZP-10091")
-    .businessKey("requestType",   "DISCONNECT")
-    .extra("finalDecision", "AUTO_DISCONNECT_ELIGIBLE")
+    .businessKey("requestType",   "USER_REQUEST")
+    .extra("finalDecision", "AUTO_USER_REQUEST_ELIGIBLE")
     .extra("duesStatus",    "CLEAR")
     .actorEntry("initiator", "CCTEAM")
     .build();
@@ -567,16 +686,16 @@ void publish(AuditStage stage, String conversationId, String traceId, Map<String
 ## Utility Helper Example
 
 ```java
-public enum DisconnectStage implements AuditStage {
-    DISCONNECT_REQUEST_RECEIVED("DISCONNECT_REQUEST_RECEIVED", AuditSource.EMAIL_POSTFIX, AuditSeverity.INFO),
+public enum UserStage implements AuditStage {
+    USER_REQUEST_REQUEST_RECEIVED("USER_REQUEST_REQUEST_RECEIVED", AuditSource.EMAIL_POSTFIX, AuditSeverity.INFO),
     BILLING_VALIDATION_FAILED  ("BILLING_VALIDATION_FAILED",   AuditSource.API,           AuditSeverity.ERROR),
-    DISCONNECT_API_TRIGGERED   ("DISCONNECT_API_TRIGGERED",    AuditSource.API,           AuditSeverity.INFO);
+    USER_REQUEST_API_TRIGGERED   ("USER_REQUEST_API_TRIGGERED",    AuditSource.API,           AuditSeverity.INFO);
 
     private final String stageName;
     private final AuditSource source;
     private final AuditSeverity severity;
 
-    DisconnectStage(String stageName, AuditSource source, AuditSeverity severity) {
+    UserStage(String stageName, AuditSource source, AuditSeverity severity) {
         this.stageName = stageName; this.source = source; this.severity = severity;
     }
 
@@ -599,7 +718,7 @@ Accepts all three payload styles:
 **1. stage + metadata map**
 ```json
 {
-  "stage": "DISCONNECT_REQUEST_RECEIVED",
+  "stage": "USER_REQUEST_REQUEST_RECEIVED",
   "conversationId": "550e8400-e29b-41d4-a716-446655440000",
   "traceId": "trace-2001",
   "source": "CRON",
@@ -625,10 +744,10 @@ Accepts all three payload styles:
 ```json
 {
   "canonicalEnvelope": {
-    "eventType": "DISCONNECT_API_TRIGGERED",
+    "eventType": "USER_REQUEST_API_TRIGGERED",
     "source": "API",
     "conversationId": "550e8400-e29b-41d4-a716-446655440000",
-    "extraMap": { "decision": "AUTO_DISCONNECT_ELIGIBLE" }
+    "extraMap": { "decision": "AUTO_USER_REQUEST_ELIGIBLE" }
   }
 }
 ```
@@ -673,7 +792,7 @@ If caller does not pass `idempotencyKey`, AuditX generates SHA-256 from:
 ## Validation Rules
 
 - `conversationId` is mandatory and must be a valid UUID.
-- If `source = UI`, `sessionId` is mandatory.
+- `sessionId` is optional for all sources including `UI` (validation removed in 1.0.8).
 
 ---
 
@@ -681,10 +800,10 @@ If caller does not pass `idempotencyKey`, AuditX generates SHA-256 from:
 
 ```java
 public enum MyAuditEvents implements AuditEventType {
-    DISCONNECT_REQUEST_RECEIVED,
+    USER_REQUEST_REQUEST_RECEIVED,
     BILLING_VALIDATION_FAILED,
-    DISCONNECT_API_TRIGGERED,
-    HARD_DISCONNECT_DONE;
+    USER_REQUEST_API_TRIGGERED,
+    HARD_USER_REQUEST_DONE;
 
     @Override
     public String code() { return name(); }

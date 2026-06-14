@@ -27,12 +27,12 @@ import java.util.Map;
 /**
  * Aspect that intercepts @AuditX methods, collects AuditXContext entries
  * accumulated during execution, and publishes a single AuditWriteRequest via AuditService.
- *
+ * <p>
  * Nesting:
  *   DEPTH tracks call depth per thread.
  *   Only the outermost @AuditX method publishes and clears.
  *   Inner @AuditX methods only contribute AuditXContext records.
- *
+ * <p>
  * conversationId / traceId:
  *   Resolved via SpEL against method arguments if expression is provided on @AuditX.
  *   Example: @AuditX(eventType="ChangeUserRole", conversationId="#request.header.userId", traceId="#request.header.traceId")
@@ -69,6 +69,18 @@ public class AuditableAspect {
         boolean isRoot = DEPTH.get() == 0;
         DEPTH.set(DEPTH.get() + 1);
         long start = System.currentTimeMillis();
+
+        if (isRoot) {
+            // Track per-iteration start so publish() reports duration of each loop iteration,
+            // not duration from method start. Reset after each inline publish.
+            final long[] iterationStart = {start};
+            AuditXContext.setInlinePublisher(() -> {
+                long elapsed = System.currentTimeMillis() - iterationStart[0];
+                publish(pjp, auditX, elapsed, null);
+                iterationStart[0] = System.currentTimeMillis();
+            });
+        }
+
         Throwable error = null;
         try {
             return pjp.proceed();   // ← business code always runs; aspect never swallows it
@@ -81,8 +93,15 @@ public class AuditableAspect {
             DEPTH.set(DEPTH.get() - 1);
             if (isRoot) {
                 try {
-                    long durationMs = System.currentTimeMillis() - start;
-                    publish(pjp, auditX, durationMs, error);
+                    // Skip final publish if publish() already flushed everything and there is
+                    // no error to record. Handles the cron/batch loop pattern cleanly.
+                    boolean hasContent = !AuditXContext.isEmpty()
+                            || !AuditXContext.tagSnapshot().isEmpty()
+                            || !AuditXContext.canonicalSnapshot().isEmpty();
+                    if (hasContent || error != null) {
+                        long durationMs = System.currentTimeMillis() - start;
+                        publish(pjp, auditX, durationMs, error);
+                    }
                 }
                 catch (Throwable publishEx) {
                     // publish failure must NEVER affect the caller — only log
@@ -103,8 +122,11 @@ public class AuditableAspect {
             return;
         }
 
-        Map<String, Object> snapshot = AuditXContext.snapshot();
+        Map<String, Object> snapshot    = AuditXContext.snapshot();
         Map<String, String> tagSnapshot = AuditXContext.tagSnapshot();
+        // canonical overrides: set via AuditXContext.recordConversationId() etc. inside
+        // the method body. They take precedence over @AuditX SpEL expressions.
+        Map<String, String> canonical   = AuditXContext.canonicalSnapshot();
 
         AuditSeverity severity = error != null ? auditX.errorSeverity() : auditX.severity();
 
@@ -124,17 +146,30 @@ public class AuditableAspect {
             builder.tags(tagSnapshot);
         }
 
-        String conversationId = resolveSpEL(auditX.conversationId(), pjp);
+        // For each canonical field: context override wins, SpEL is the fallback.
+        String conversationId = canonical.containsKey("conversationId")
+                ? canonical.get("conversationId")
+                : resolveSpEL(auditX.conversationId(), pjp);
         if (conversationId != null) builder.conversationId(conversationId);
 
-        String traceId = resolveSpEL(auditX.traceId(), pjp);
+        String traceId = canonical.containsKey("traceId")
+                ? canonical.get("traceId")
+                : resolveSpEL(auditX.traceId(), pjp);
         if (traceId != null) builder.traceId(traceId);
 
-        String groupId = resolveSpEL(auditX.groupId(), pjp);
+        String groupId = canonical.containsKey("groupId")
+                ? canonical.get("groupId")
+                : resolveSpEL(auditX.groupId(), pjp);
         if (groupId != null) builder.groupId(groupId);
 
-        String interactionId = resolveSpEL(auditX.interactionId(), pjp);
+        String interactionId = canonical.containsKey("interactionId")
+                ? canonical.get("interactionId")
+                : resolveSpEL(auditX.interactionId(), pjp);
         if (interactionId != null) builder.interactionId(interactionId);
+
+        // sessionId has no @AuditX SpEL equivalent — context-only
+        String sessionId = canonical.get("sessionId");
+        if (sessionId != null) builder.sessionId(sessionId);
 
         if (error != null) {
             String msg = error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();

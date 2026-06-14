@@ -3,96 +3,119 @@ package com.github.salilvnair.auditx.core.aop.context;
 import java.util.*;
 
 /**
- * Thread-local context that accumulates key-value audit facts (branch variables,
- * decision flags, computed values) during a single method's execution.
-
- * Designed to work with @AuditX and AuditableAspect.
- * After the outermost @AuditX method exits, the aspect reads the snapshot,
- * publishes it via AuditService, and clears the context.
-
- * Usage — drop anywhere in your service/workflow/handler:
-
- *   AuditXContext.record("adminUser", adminUser);
- *   AuditXContext.record("testApproved", testApproved);
- *   AuditXContext.record("callbackPath", "failure");
+ * Thread-local context that accumulates audit facts during a single @AuditX method's execution.
  * <p>
- *   AuditXContext.tag("tenant", tenantId);
- *   AuditXContext.tag("env", "production");
- *   AuditXContext.tag("featureFlag", "new-pricing-enabled");
+ * Three storage buckets:
+ *   CONTEXT   — arbitrary key/value pairs → written to extra_map JSONB column
+ *   TAGS      — string-only key/value pairs → written to tags JSONB column (indexed)
+ *   CANONICAL — canonical field overrides (conversationId, interactionId, etc.)
+ *               → override @AuditX SpEL expressions; last write wins
  * <p>
- *   AuditXContext.append("visitedNode", nodeId); // for recursive/looping methods
+ * One publish control:
+ *   publish() — triggers an immediate audit record publish and resets all three buckets
+ *               for the next iteration. Designed for cron/batch loops where each
+ *               iteration needs its own audit record.
  * <p>
+ * Usage examples:
+ * <p>
+ *   // Single record
+ *   AuditXContext.record("psrCustomer", customer.isPsr());
+ * <p>
+ *   // Bulk records (alternating key, value, key, value, ...)
  *   AuditXContext.records(
- *       "billRef",           billRef,
- *       "finalMeterReading", reading.toPlainString(),
- *       "billingEngine",     "BILLING_API_V2"
+ *       "billRef",       bill.getBillRef(),
+ *       "billingEngine", "BILLING_API_V2"
  *   );
  * <p>
+ *   // Single tag
+ *   AuditXContext.tag("system", "ZAPPER");
+ * <p>
+ *   // Bulk tags
  *   AuditXContext.tags(
  *       "system",      "ZAPPER",
- *       "meterSerial", meterSerial != null ? meterSerial : "UNKNOWN"
+ *       "meterSerial", serial
  *   );
-
+ * <p>
+ *   // Canonical field overrides (prefer over @AuditX SpEL)
+ *   AuditXContext.recordConversationId(userId);
+ *   AuditXContext.recordInteractionId(userId);
+ *   AuditXContext.recordGroupId(batchId);
+ *   AuditXContext.recordTraceId(traceId);
+ *   AuditXContext.recordSessionId(sessionId);
+ * <p>
+ *   // Mid-loop publish (cron/batch pattern)
+ *   for (UserRequest req : pending) {
+ *       AuditXContext.recordInteractionId(req.getUserId());
+ *       AuditXContext.record("outcome", "SUCCESS");
+ *       AuditXContext.publish(); // publish this iteration, reset for next
+ *   }
+ * <p>
  * No Spring injection needed. Pure static calls.
  * Works across the entire call chain in the same thread.
  */
 public final class AuditXContext {
 
+    // extra_map bucket — arbitrary runtime values
     private static final ThreadLocal<Map<String, Object>> CONTEXT =
             ThreadLocal.withInitial(LinkedHashMap::new);
 
-    // Tags are string-only values — used for structured, low-cardinality metadata
-    // (environment, tenant, region, feature-flag) that goes into its own DB column
-    // so it can be indexed and filtered without touching extraMap.
+    // tags bucket — string-only, low-cardinality, indexed JSONB column
     private static final ThreadLocal<Map<String, String>> TAGS =
             ThreadLocal.withInitial(LinkedHashMap::new);
 
+    // canonical overrides — set from inside the method body; override @AuditX SpEL
+    private static final ThreadLocal<Map<String, String>> CANONICAL =
+            ThreadLocal.withInitial(LinkedHashMap::new);
+
+    // wired by AuditableAspect on entry; called by publish() for mid-loop records
+    private static final ThreadLocal<Runnable> INLINE_PUBLISHER = new ThreadLocal<>();
+
     private AuditXContext() {}
 
+    // ── extra_map record methods ───────────────────────────────────────────── //
+
     /**
-     * Record a single key-value pair.
+     * Record a single key-value pair into extra_map.
      * Overwrites if the key already exists.
-     * Use for flags and one-time values: adminUser, testApproved, callbackPath.
      */
     public static void record(String key, Object value) {
         CONTEXT.get().put(key, value);
     }
 
     /**
-     * Record a structured tag — a string key/value pair stored in a dedicated tags column.
-     * Use for low-cardinality, indexable metadata: tenant, environment, region, feature-flag.
-     * These go into their own DB column (not extraMap), so they can be filtered efficiently.
-     * <p>
-     * Contrast with record(): record() is for arbitrary runtime values (booleans, counts,
-     * computed objects). tag() is for stable, categorical labels you will query by.
+     * Record multiple key-value pairs in one call.
+     * Pairs must alternate: key, value, key, value, ...
+     * Keys must be Strings; values can be any Object.
+     * Throws IllegalArgumentException on odd count — fails loudly (programmer error).
      * <p>
      * Example:
-     *   AuditXContext.tag("tenant", tenantId);
-     *   AuditXContext.tag("env", "production");
-     *   AuditXContext.tag("featureFlag", "new-pricing-enabled");
+     *   AuditXContext.records(
+     *       "billRef",       bill.getBillRef(),
+     *       "billingEngine", "BILLING_API_V2"
+     *   );
      */
-    public static void tag(String key, String value) {
-        TAGS.get().put(key, value);
-    }
-
-    /** Read the full tag snapshot. Returns an unmodifiable view. */
-    public static Map<String, String> tagSnapshot() {
-        return Collections.unmodifiableMap(TAGS.get());
+    public static void records(Object... pairs) {
+        if (pairs.length % 2 != 0) {
+            throw new IllegalArgumentException("records() requires an even number of arguments (key, value, ...)");
+        }
+        Map<String, Object> ctx = CONTEXT.get();
+        for (int i = 0; i < pairs.length; i += 2) {
+            ctx.put((String) pairs[i], pairs[i + 1]);
+        }
     }
 
     /**
      * Append a value to a list under the given key.
-     * Safe for recursive or looping methods where the same key is written many times.
+     * Safe for loops and recursive methods — accumulates values without overwriting.
      * <p>
      * Behaviour:
-     *   - Key does not exist yet          → creates List with this value
-     *   - Key exists as a plain value     → converts to List, keeps old value, adds new
-     *   - Key exists as a List            → appends to the existing list
+     *   - Key absent           → creates List containing this value
+     *   - Key = plain value    → converts to List [old, new]
+     *   - Key = List           → appends to the existing list
      * <p>
-     * Example in a recursive method:
-     *   AuditXContext.append("visitedNode", nodeId);
-     * Snapshot result:
-     *   { "visitedNode": [1, 4, 7, 3] }
+     * Example:
+     *   AuditXContext.append("visitedNodes", nodeId);
+     *   // → { "visitedNodes": ["A", "B", "C"] }
      */
     @SuppressWarnings("unchecked")
     public static void append(String key, Object value) {
@@ -114,37 +137,44 @@ public final class AuditXContext {
         }
     }
 
+    /** Read the full extra_map snapshot. Returns an unmodifiable view. */
+    public static Map<String, Object> snapshot() {
+        return Collections.unmodifiableMap(CONTEXT.get());
+    }
+
+    /** True when nothing has been recorded into extra_map yet. */
+    public static boolean isEmpty() {
+        return CONTEXT.get().isEmpty();
+    }
+
+    // ── tag methods ───────────────────────────────────────────────────────── //
+
     /**
-     * Record multiple key-value pairs in one call.
-     * Pairs must alternate: key, value, key, value, ...
-     * Keys must be Strings; values can be any Object.
+     * Write a single structured tag — stored in the dedicated tags JSONB column.
+     * Use for low-cardinality, indexable metadata: tenant, environment, system, feature-flag.
+     * Both key and value must be Strings.
+     * <p>
+     * Contrast with record(): record() is for arbitrary runtime values.
+     * tag() is for stable categorical labels you will filter/index by.
      * <p>
      * Example:
-     *   AuditXContext.records(
-     *       "billRef",           billRef,
-     *       "finalMeterReading", reading.toPlainString(),
-     *       "billingEngine",     "BILLING_API_V2"
-     *   );
+     *   AuditXContext.tag("system", "ZAPPER");
+     *   AuditXContext.tag("env",    "production");
      */
-    public static void records(Object... pairs) {
-        if (pairs.length % 2 != 0) {
-            throw new IllegalArgumentException("records() requires an even number of arguments (key, value, ...)");
-        }
-        Map<String, Object> ctx = CONTEXT.get();
-        for (int i = 0; i < pairs.length; i += 2) {
-            ctx.put((String) pairs[i], pairs[i + 1]);
-        }
+    public static void tag(String key, String value) {
+        TAGS.get().put(key, value);
     }
 
     /**
-     * Record multiple tags in one call.
+     * Write multiple tags in one call.
      * Pairs must alternate: key, value, key, value, ...
      * Both keys and values must be Strings.
+     * Throws IllegalArgumentException on odd count.
      * <p>
      * Example:
      *   AuditXContext.tags(
      *       "system",      "ZAPPER",
-     *       "meterSerial", meterSerial != null ? meterSerial : "UNKNOWN"
+     *       "meterSerial", serial != null ? serial : "UNKNOWN"
      *   );
      */
     public static void tags(Object... pairs) {
@@ -157,19 +187,123 @@ public final class AuditXContext {
         }
     }
 
-    /** Read the full snapshot. Returns an unmodifiable view. */
-    public static Map<String, Object> snapshot() {
-        return Collections.unmodifiableMap(CONTEXT.get());
+    /** Read the full tag snapshot. Returns an unmodifiable view. */
+    public static Map<String, String> tagSnapshot() {
+        return Collections.unmodifiableMap(TAGS.get());
     }
 
-    /** True when nothing has been recorded yet (does not check tags). */
-    public static boolean isEmpty() {
-        return CONTEXT.get().isEmpty();
+    // ── canonical field overrides ─────────────────────────────────────────── //
+
+    /**
+     * Set the conversationId for the audit record from inside the method body.
+     * Overrides the conversationId SpEL expression on @AuditX if both are present.
+     * Last call wins — safe to call multiple times.
+     */
+    public static void recordConversationId(String conversationId) {
+        CANONICAL.get().put("conversationId", conversationId);
     }
 
-    /** Clear both the context and tags. Called by AuditableAspect when the outermost method exits. */
+    /**
+     * Set the interactionId for the audit record from inside the method body.
+     * Overrides the interactionId SpEL expression on @AuditX if both are present.
+     * Last call wins.
+     * <p>
+     * Typical use — cron loop where interactionId = per-item request ID:
+     *   AuditXContext.recordInteractionId(req.getUserId());
+     */
+    public static void recordInteractionId(String interactionId) {
+        CANONICAL.get().put("interactionId", interactionId);
+    }
+
+    /**
+     * Set the groupId for the audit record from inside the method body.
+     * Overrides the groupId SpEL expression on @AuditX if both are present.
+     * Last call wins.
+     */
+    public static void recordGroupId(String groupId) {
+        CANONICAL.get().put("groupId", groupId);
+    }
+
+    /**
+     * Set the traceId for the audit record from inside the method body.
+     * Overrides the traceId SpEL expression on @AuditX if both are present.
+     * Last call wins.
+     */
+    public static void recordTraceId(String traceId) {
+        CANONICAL.get().put("traceId", traceId);
+    }
+
+    /**
+     * Set the sessionId for the audit record from inside the method body.
+     * No SpEL equivalent on @AuditX — this is the only way to set sessionId via context.
+     * Last call wins.
+     */
+    public static void recordSessionId(String sessionId) {
+        CANONICAL.get().put("sessionId", sessionId);
+    }
+
+    /** Read the full canonical overrides snapshot. Returns an unmodifiable view. */
+    public static Map<String, String> canonicalSnapshot() {
+        return Collections.unmodifiableMap(CANONICAL.get());
+    }
+
+    // ── mid-loop publish ──────────────────────────────────────────────────── //
+
+    /**
+     * Publish the current context immediately as an audit record, then reset
+     * extra_map, tags, and canonical overrides so the next iteration starts clean.
+     * <p>
+     * Must be called from within an @AuditX-annotated method (the aspect wires the
+     * publisher on entry). Throws IllegalStateException if called outside @AuditX.
+     * <p>
+     * Designed for cron/batch loops where each iteration needs its own audit record:
+     *
+     *   @AuditX(eventType = "ZAP_CRON_USER_REQUEST", source = AuditSource.CRON)
+     *   public void cronJob() {
+     *       for (UserRequest req : pending) {
+     *           AuditXContext.recordInteractionId(req.getUserId());
+     *           AuditXContext.record("outcome", "SUCCESS");
+     *           AuditXContext.publish();   // one record per iteration
+     *       }
+     *       // method exits → context empty → aspect skips final publish
+     *   }
+     * <p>
+     * If the method exits normally with a non-empty context (i.e. publish() was NOT
+     * called, or was called but more records were added after the last call), the
+     * aspect publishes once on exit as usual.
+     */
+    public static void publish() {
+        Runnable publisher = INLINE_PUBLISHER.get();
+        if (publisher == null) {
+            throw new IllegalStateException(
+                "AuditXContext.publish() must be called within an @AuditX method. " +
+                "Ensure the calling method (or one of its callers) is annotated with @AuditX.");
+        }
+        publisher.run();
+        // Reset all three buckets for the next iteration; INLINE_PUBLISHER stays wired.
+        CONTEXT.remove();
+        TAGS.remove();
+        CANONICAL.remove();
+    }
+
+    // ── lifecycle — called by AuditableAspect only ────────────────────────── //
+
+    /**
+     * Wires the inline publisher used by publish().
+     * Called by AuditableAspect on root method entry — do not call directly.
+     */
+    public static void setInlinePublisher(Runnable publisher) {
+        INLINE_PUBLISHER.set(publisher);
+    }
+
+    /**
+     * Clears all thread-locals including the inline publisher.
+     * Called by AuditableAspect in the outermost method's finally block.
+     */
     public static void clear() {
         CONTEXT.remove();
         TAGS.remove();
+        CANONICAL.remove();
+        INLINE_PUBLISHER.remove();
     }
 }
