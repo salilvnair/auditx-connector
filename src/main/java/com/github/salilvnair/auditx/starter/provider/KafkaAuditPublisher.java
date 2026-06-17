@@ -2,7 +2,6 @@ package com.github.salilvnair.auditx.starter.provider;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.salilvnair.auditx.core.model.AuditSource;
 import com.github.salilvnair.auditx.core.model.CanonicalAuditEnvelope;
 import com.github.salilvnair.auditx.core.service.AuditPublisher;
 import com.github.salilvnair.auditx.core.service.IdempotencyKeyFactory;
@@ -13,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.kafka.core.KafkaTemplate;
 
+import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -43,7 +43,6 @@ public class KafkaAuditPublisher implements AuditPublisher {
     }
 
     private void doPublish(CanonicalAuditEnvelope envelope) {
-        validate(envelope);
         CanonicalAuditEnvelope enriched = enrichDefaults(envelope);
         String key = messageKey(enriched);
         String payload = toJson(enriched);
@@ -51,13 +50,40 @@ public class KafkaAuditPublisher implements AuditPublisher {
     }
 
     private CanonicalAuditEnvelope enrichDefaults(CanonicalAuditEnvelope envelope) {
-        if (!properties.isEnforceIdempotency()) {
-            return envelope;
+        CanonicalAuditEnvelope withServiceFields = CanonicalAuditEnvelope.builder()
+                .eventId(envelope.getEventId() != null ? envelope.getEventId() : UUID.randomUUID())
+                .eventTime(envelope.getEventTime() != null ? envelope.getEventTime() : Instant.now())
+                .eventType(envelope.getEventType())
+                .severity(envelope.getSeverity())
+                .source(envelope.getSource())
+                .serviceName(envelope.getServiceName())
+                .serviceVersion(envelope.getServiceVersion())
+                .environment(envelope.getEnvironment())
+                .sessionId(envelope.getSessionId())
+                .conversationId(envelope.getConversationId())
+                .groupId(envelope.getGroupId())
+                .interactionId(envelope.getInteractionId())
+                .traceId(envelope.getTraceId())
+                .spanId(envelope.getSpanId())
+                .idempotencyKey(envelope.getIdempotencyKey())
+                .businessKeys(envelope.getBusinessKeys())
+                .extraMap(envelope.getExtraMap())
+                .tags(envelope.getTags())
+                .actor(envelope.getActor())
+                .errorMap(envelope.getErrorMap())
+                .build();
+
+        // Auto-generate conversationId if not supplied.
+        withServiceFields = isBlank(withServiceFields.getConversationId())
+                ? withServiceFields.withConversationId(UUID.randomUUID().toString())
+                : withServiceFields;
+
+        // Always generate an idempotency key — enforce-idempotency only controls duplicate checking.
+        if (isBlank(withServiceFields.getIdempotencyKey())) {
+            return withServiceFields.withIdempotencyKey(idempotencyKeyFactory.create(withServiceFields));
         }
-        if (isBlank(envelope.getIdempotencyKey())) {
-            return envelope.withIdempotencyKey(idempotencyKeyFactory.create(envelope));
-        }
-        return envelope;
+
+        return withServiceFields;
     }
 
     private String messageKey(CanonicalAuditEnvelope envelope) {
@@ -80,22 +106,6 @@ public class KafkaAuditPublisher implements AuditPublisher {
             return objectMapper.writeValueAsString(envelope);
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("Failed to serialize audit envelope for Kafka publish", ex);
-        }
-    }
-
-    private void validate(CanonicalAuditEnvelope envelope) {
-        if (isBlank(envelope.getConversationId())) {
-            throw new IllegalArgumentException("conversationId is required and must be a UUID");
-        }
-
-        try {
-            UUID.fromString(envelope.getConversationId());
-        } catch (IllegalArgumentException ex) {
-            throw new IllegalArgumentException("conversationId must be a valid UUID", ex);
-        }
-
-        if (envelope.getSource() == AuditSource.UI && isBlank(envelope.getSessionId())) {
-            throw new IllegalArgumentException("sessionId is required when source is UI");
         }
     }
 

@@ -448,24 +448,40 @@ Must be called from within an `@AuditX`-annotated method — throws `IllegalStat
 
 When the method exits normally with an **empty** context (all iterations called `publish()`), the aspect **skips** the final publish. If the method throws after partial iterations, the failing iteration's context is captured with the error in the final publish.
 
-**Pattern A — `@AuditX` on the inner per-item method**
+**Pattern A — `@AuditX` on the per-item method; loop in a different bean**
 
 Each call to `processOneRequest()` is depth=0 → publishes its own record independently.
-Simplest approach. No `publish()` needed.
+No `publish()` needed.
+
+> ⚠️ **Spring AOP constraint:** `@AuditX` only intercepts calls that go through the **Spring proxy**.
+> Calling `this.processOneRequest()` from within the **same class** bypasses the proxy — the aspect
+> never fires. **The loop must live in a different Spring bean** so the call routes through the proxy.
 
 ```java
-// Outer orchestrator — no @AuditX
-public List<String> runBatch() {
-    List<UserRequestEntity> pending = repo.findByStatusNotIn(List.of(900, 950, 999));
-    for (UserRequestEntity req : pending) {
-        processOneRequest(req.getId(), req.getAccountNumber());  // each call = its own record
+// ── CronProvider.java (separate @Component) ──────────────────────────── //
+// Spring injects DisconnectCronService as its CGLIB proxy.
+// Each cronService.processOneRequest() call goes through the proxy → @AuditX fires.
+@Component
+@RequiredArgsConstructor
+public class DisconnectCronProvider {
+
+    private final DisconnectCronService cronService; // ← this IS the proxy
+
+    public List<String> runBatch() {
+        List<DisconnectRequestEntity> pending = repo.findByStatusNotIn(List.of(900, 950, 999));
+        List<String> processed = new ArrayList<>();
+        for (DisconnectRequestEntity req : pending) {
+            cronService.processOneRequest(req.getId(), req.getAccountNumber()); // proxy ✅
+            processed.add(req.getId());
+        }
+        return processed;
     }
 }
 
-// Per-item method carries its own @AuditX
+// ── DisconnectCronService.java ─────────────────────────────────────────── //
 @AuditX(eventType = "ZAP_CRON_PROCESS_ITEM", source = AuditSource.CRON)
-public void processOneRequest(String userId, String accountNumber) {
-    AuditXContext.recordInteractionId(userId);
+public void processOneRequest(String requestId, String accountNumber) {
+    AuditXContext.recordInteractionId(requestId);
     AuditXContext.recordGroupId("CRON-" + Instant.now().toEpochMilli() / 60_000);
     AuditXContext.records("accountNumber", accountNumber);
     // ... business logic
@@ -475,25 +491,30 @@ public void processOneRequest(String userId, String accountNumber) {
 
 **Pattern B — `@AuditX` on the outer method + `publish()` in the loop**
 
-One `@AuditX` wraps the whole batch method. `publish()` fires at the end of each iteration to flush that item's context and reset for the next one.
+`@AuditX` goes on the outer batch method (the external entry point through the Spring proxy).
+`publish()` fires at the end of each loop iteration — one audit row per item, context resets automatically for the next.
+
+> Rule: always call `publish()` at the end of every iteration, even for skipped items.
+> If you skip `publish()` for an item, its context bleeds into the next iteration's record.
+> For items you want to skip auditing entirely, record `"outcome", "SKIPPED"` and still call `publish()`.
+
+---
+
+**Example 1 — basic success / failure**
+
+Core loop structure: record → work → catch → publish.
 
 ```java
-@AuditX(eventType = "ZAP_CRON_BATCH_ITEM", source = AuditSource.CRON)
+@AuditX(eventType = "ZAP_CRON_BATCH_PROCESS", source = AuditSource.CRON)
 public List<String> processPendingBatch(String batchId) {
-    List<UserRequestEntity> pending = repo.findByStatusNotIn(List.of(900, 950, 999));
+    List<DisconnectRequestEntity> items = repo.findByStatusNotIn(List.of(900, 950, 999));
     List<String> processed = new ArrayList<>();
 
-    for (UserRequestEntity req : pending) {
-        // canonical fields — per-item, reset by publish() each iteration
+    for (DisconnectRequestEntity req : items) {
         AuditXContext.recordInteractionId(req.getId());
-        AuditXContext.recordGroupId(batchId);  // ties all rows to this batch run
-
+        AuditXContext.recordGroupId(batchId);
         AuditXContext.tag("system", "ZAPPER");
-        AuditXContext.records(
-            "accountNumber",  req.getAccountNumber(),
-            "processingMode", "PATTERN_B_INLINE_PUBLISH",
-            "batchId",        batchId
-        );
+        AuditXContext.records("accountNumber", req.getAccountNumber(), "batchId", batchId);
 
         try {
             doWork(req.getId());
@@ -504,15 +525,179 @@ public List<String> processPendingBatch(String batchId) {
             AuditXContext.record("failureReason", ex.getMessage());
         }
 
-        AuditXContext.publish(); // flush this item → reset → next iteration starts clean
+        AuditXContext.publish(); // one row per item, resets for the next
     }
 
-    // method exits with empty context → aspect skips final publish → no duplicate record
-    return processed;
+    return processed; // context empty → aspect skips final publish
 }
 ```
 
-Result in DB: one row per loop iteration, each with its own `interaction_id`, grouped by `group_id = batchId`.
+---
+
+**Example 2 — retry with exhaustion check**
+
+Shows: recording a numeric counter field, branching to different outcome values, tagging rows by retry type for easy filtering.
+
+```java
+@AuditX(eventType = "ZAP_CRON_RETRY_TIMEOUT", source = AuditSource.CRON)
+public void retryTimedOutRequests(String batchId) {
+    List<DisconnectRequestEntity> timedOut = repo.findByStatus(MOIG_TIMEOUT);
+
+    for (DisconnectRequestEntity req : timedOut) {
+        AuditXContext.recordInteractionId(req.getId());
+        AuditXContext.recordGroupId(batchId);
+        AuditXContext.tag("system",    "ZAPPER");
+        AuditXContext.tag("retryType", "MOIG_TIMEOUT");   // tag = filterable in SQL
+        AuditXContext.records(
+            "accountNumber", req.getAccountNumber(),
+            "retryAttempt",  req.getRetryCount() + 1,
+            "maxRetry",      MAX_RETRY
+        );
+
+        if (req.getRetryCount() >= MAX_RETRY) {
+            AuditXContext.record("outcome", "RETRY_EXHAUSTED");
+            AuditXContext.publish();
+            continue; // exhausted items still get their own row — then skip work
+        }
+
+        try {
+            submitRetry(req.getId());
+            AuditXContext.record("outcome", "RETRY_SUBMITTED");
+        } catch (Exception ex) {
+            AuditXContext.record("outcome",       "RETRY_FAILED");
+            AuditXContext.record("failureReason", ex.getMessage());
+        }
+
+        AuditXContext.publish();
+    }
+}
+```
+
+---
+
+**Example 3 — conditional skip with full audit trail**
+
+Shows: items that don't need work still get a row (`"outcome", "ALREADY_SENT"`). Every item in the batch has an audit row — not just the ones that were actioned. This gives you a complete picture of what the cron ran over.
+
+```java
+@AuditX(eventType = "ZAP_CRON_NOTIFICATIONS", source = AuditSource.CRON)
+public int sendDisconnectNotifications(String campaignId) {
+    List<DisconnectRequestEntity> candidates = repo.findPendingNotifications();
+    int sent = 0;
+
+    for (DisconnectRequestEntity req : candidates) {
+        AuditXContext.recordInteractionId(req.getId());
+        AuditXContext.recordGroupId(campaignId);
+        AuditXContext.tag("system",       "ZAPPER");
+        AuditXContext.tag("campaignType", "28_DAY_NOTICE");
+        AuditXContext.record("accountNumber", req.getAccountNumber());
+
+        if (req.getNotificationSentAt() != null) {
+            // Already sent — record why we skipped, still publish the skip row
+            AuditXContext.records(
+                "outcome",        "ALREADY_SENT",
+                "previousSentAt", req.getNotificationSentAt().toString()
+            );
+            AuditXContext.publish();
+            continue; // skip to next — publish was already called above
+        }
+
+        try {
+            sendNotification(req.getId());
+            AuditXContext.records("outcome", "SENT", "notifiedAt", Instant.now().toString());
+            sent++;
+        } catch (Exception ex) {
+            AuditXContext.record("outcome",       "SEND_FAILED");
+            AuditXContext.record("failureReason", ex.getMessage());
+        }
+
+        AuditXContext.publish();
+    }
+
+    return sent;
+}
+```
+
+---
+
+**Example 4 — capture boolean result per item**
+
+Shows: outcome derived from a boolean returned by business logic, not from try/catch. The boolean field itself is also recorded so you can query `WHERE extra_map->>'smartDisconnectSuccess' = 'false'`.
+
+```java
+@AuditX(eventType = "ZAP_CRON_SMART_DISCONNECT", source = AuditSource.CRON)
+public void runSmartDisconnectSweep(String sweepId) {
+    List<DisconnectRequestEntity> eligible = repo.findSmartDisconnectEligible();
+
+    for (DisconnectRequestEntity req : eligible) {
+        AuditXContext.recordInteractionId(req.getId());
+        AuditXContext.recordGroupId(sweepId);
+        AuditXContext.tag("system",         "ZAPPER");
+        AuditXContext.tag("disconnectMode", "SMART");
+        AuditXContext.records(
+            "accountNumber",       req.getAccountNumber(),
+            "previouslyAttempted", req.isSmartDisconnectAttempted()
+        );
+
+        boolean success           = attemptSmartDisconnect(req.getId());
+        boolean fieldVisitNeeded  = !success;
+
+        AuditXContext.records(
+            "smartDisconnectSuccess", success,
+            "fieldVisitScheduled",    fieldVisitNeeded,
+            "outcome",                success ? "SMART_DISCONNECTED" : "FIELD_VISIT_REQUIRED"
+        );
+
+        AuditXContext.publish();
+    }
+}
+```
+
+---
+
+**Example 5 — before/after state (decision audit trail)**
+
+Shows: recording state BEFORE the check and the decision AFTER. This is the standard pattern for reconciliation jobs — the audit row captures what the system saw AND what it decided, in a single record. Useful for debugging "why did the hold get released?" questions.
+
+```java
+@AuditX(eventType = "ZAP_CRON_DEBT_RECONCILE", source = AuditSource.CRON)
+public void reconcileDebtHolds(String batchId) {
+    List<DisconnectRequestEntity> items = repo.findByStatusNotIn(List.of(900, 950, 999));
+
+    for (DisconnectRequestEntity req : items) {
+        AuditXContext.recordInteractionId(req.getId());
+        AuditXContext.recordGroupId(batchId);
+        AuditXContext.tag("system",    "ZAPPER");
+        AuditXContext.tag("checkType", "DEBT_HOLD");
+
+        // state BEFORE — record it first so it's always captured even if the check throws
+        AuditXContext.records(
+            "accountNumber",     req.getAccountNumber(),
+            "debtHoldBefore",    req.isDebtHold(),
+            "vulnerabilityHold", req.isVulnerabilityHold()
+        );
+
+        if (!req.isDebtHold()) {
+            AuditXContext.record("outcome", "NO_HOLD_PRESENT");
+            AuditXContext.publish();
+            continue;
+        }
+
+        boolean debtCleared = externalDebtService.isDebtCleared(req.getAccountNumber());
+
+        // state AFTER + decision
+        AuditXContext.records(
+            "debtCleared",   debtCleared,
+            "debtHoldAfter", !debtCleared,
+            "outcome",       debtCleared ? "HOLD_RELEASED" : "HOLD_RETAINED"
+        );
+
+        AuditXContext.publish();
+    }
+}
+```
+
+Result in DB: one row per item per run. Query the full batch with `WHERE group_id = 'batchId'`. Query only released holds with `WHERE event_type = 'ZAP_CRON_DEBT_RECONCILE' AND extra_map->>'outcome' = 'HOLD_RELEASED'`.
 
 ---
 

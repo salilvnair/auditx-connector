@@ -2,9 +2,10 @@ package com.github.salilvnair.auditx.core.model;
 
 public enum AuditSource {
     UI,
-    EMAIL_POSTFIX,
+    BACKEND,
+    EMAIL,
     CRON,
-    SYSTEM,
+    DB,
     API,
     OTHER
 }
