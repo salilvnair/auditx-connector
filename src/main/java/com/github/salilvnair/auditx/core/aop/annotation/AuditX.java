@@ -37,8 +37,8 @@ public @interface AuditX {
     /** Event type / stage name written to the audit record. */
     String eventType();
 
-    /** Source system. Defaults to SYSTEM. */
-    AuditSource source() default AuditSource.SYSTEM;
+    /** Source system. Defaults to BACKEND. */
+    AuditSource source() default AuditSource.BACKEND;
 
     /** Severity on success. */
     AuditSeverity severity() default AuditSeverity.INFO;
